@@ -5,45 +5,65 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from positional_encodings import PositionalEncoding
+import os
 
+# need to implement learnable add
 
 @dataclass
 class SentenceEncoderConfig:
-    hidden_size: int = 128
+    word_embed_proj_dim: Optional[int] = 64
+    hidden_size: int = 512
     vocab_size: int = 64
-    device: str = 'cpu'
-    dtype: torch.dtype = torch.float32
     max_seq_len: int = 128
     num_hidden_layers: int = 2
     num_attention_heads: int = 2
     pad_id: int = 0
     dropout: float = 0.0
+    load_embedding_weights: bool = False
+    embedding_weights_path: Optional[str] = None
+    do_finetune: bool = False
+    # learnable_add: bool = False 
 
+torch.manual_seed(42)
 
 class SentenceEncoder(nn.Module):
     def __init__(self,
+                word_embed_proj_dim: int,
                 hidden_size: int,
                 vocab_size: int,
-                device: str,
-                dtype: torch.dtype,
                 max_seq_len: int,
                 num_hidden_layers: int,
                 num_attention_heads: int,
                 pad_id: int,
                 dropout: float = 0.0,
                 load_embedding_weights: bool = False,
-                embedding_weights_path: Optional[str] = None) -> None: 
+                embedding_weights_path: Optional[str] = None,
+                do_finetune: bool = False) -> None: # need to implement learnable_add: bool = False 
         
         super().__init__()
-        self.device = device
-        self.dtype = dtype
+        # self.learnable_add = learnable_add
+        word_embed_proj_dim = word_embed_proj_dim if word_embed_proj_dim is not None else hidden_size
 
-        self.embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=pad_id)
+        self.embedding = nn.Embedding(vocab_size, word_embed_proj_dim, padding_idx=pad_id)
+        self.positional_encoding = PositionalEncoding(hidden_size, max_seq_len)
+
+        if word_embed_proj_dim != hidden_size:
+            self.projection = nn.Linear(word_embed_proj_dim, hidden_size, bias=False)
+        else:
+            self.projection = None
+
         if load_embedding_weights and embedding_weights_path is not None:
-            embedding_weights = torch.load(embedding_weights_path)
-            self.embedding.load_state_dict(embedding_weights)
+            if os.path.exists(embedding_weights_path):
+                embedding_weights = torch.load(embedding_weights_path)
+                self.embedding.load_state_dict(embedding_weights)
+            else:
+                raise FileNotFoundError(f"Embedding weights not found at {embedding_weights_path}")
+        
 
-        self.positional_encoding = PositionalEncoding(hidden_size, max_seq_len, dtype=dtype, device=device)
+        if do_finetune:
+            self.embedding.requires_grad = True
+        else:
+            self.embedding.requires_grad = False
 
         self.encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_size,
@@ -57,7 +77,10 @@ class SentenceEncoder(nn.Module):
             num_layers=num_hidden_layers
         )
 
-        self.layer_norm = nn.LayerNorm(hidden_size, device=device, dtype=dtype)
+        # if learnable_add:
+            # self.la = nn.Linear(hidden_size, 1)
+
+        self.layer_norm = nn.LayerNorm(hidden_size)
 
 
     def forward(self, input_ids, attention_mask):
@@ -66,35 +89,39 @@ class SentenceEncoder(nn.Module):
 
         input_embeddings = self.embedding(input_ids)
         positional_embeddings = self.positional_encoding(seq_len)
+
+        if self.projection is not None:
+            input_embeddings = self.projection(input_embeddings)
+
         embeddings = input_embeddings + positional_embeddings
 
         hidden_states = self.encoder(embeddings, src_key_padding_mask=attention_mask)
         hidden_states[attention_mask] = 0
 
-        # need to add sum
+        sentence_embedding = hidden_states.sum(-2, keepdim=True)
+        sentence_embedding = self.layer_norm(sentence_embedding)
+        
+        return sentence_embedding
 
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
-    
-# # pass the config to the model
-# config = SentenceEncoderConfig()
+config = SentenceEncoderConfig()
 
-# # create the model
-# model = SentenceEncoder(
-#     hidden_size=config.hidden_size,
-#     vocab_size=config.vocab_size,
-#     device=config.device,
-#     dtype=config.dtype,
-#     max_seq_len=config.max_seq_len,
-#     num_hidden_layers=config.num_hidden_layers,
-#     num_attention_heads=config.num_attention_heads,
-#     pad_id=config.pad_id,
-#     dropout=config.dropout
-# )
+# create the model
+model = SentenceEncoder(
+    word_embed_proj_dim=config.word_embed_proj_dim,
+    hidden_size=config.hidden_size,
+    vocab_size=config.vocab_size,
+    max_seq_len=config.max_seq_len,
+    num_hidden_layers=config.num_hidden_layers,
+    num_attention_heads=config.num_attention_heads,
+    pad_id=config.pad_id,
+    dropout=config.dropout,
+    load_embedding_weights=config.load_embedding_weights,
+    embedding_weights_path=config.embedding_weights_path,
+    do_finetune=config.do_finetune
+)
 
-# # pass a sample input to the model
+# pass a sample input to the model
 
-# input_ids = torch.randint(0, config.vocab_size, (1, config.max_seq_len))
-# attention_mask = input_ids != config.pad_id
-# hidden_states = model(input_ids, attention_mask)
-# print(hidden_states)
+input_ids = torch.randint(0, config.vocab_size, (1, config.max_seq_len))
+attention_mask = input_ids != config.pad_id
+hidden_states = model(input_ids, attention_mask)

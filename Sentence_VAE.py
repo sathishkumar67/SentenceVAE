@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from positional_encodings import PositionalEncoding
 import os
 
-# need to implement learnable add
 
 @dataclass
 class SentenceEncoderConfig:
@@ -23,6 +22,7 @@ class SentenceEncoderConfig:
     embedding_weights_path: Optional[str] = None
     do_finetune: bool = False
     learnable_add: bool = False 
+    seed: int = 42
 
 torch.manual_seed(42)
 
